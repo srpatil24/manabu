@@ -118,7 +118,8 @@ const importBooks = async () => {
 
       // Unzip the EPUB content
       const zip = new JSZip();
-      await zip.loadAsync(epubContent, { base64: true });
+      // await zip.loadAsync(epubContent, { base64: true });
+      const zipData = await zip.loadAsync(epubContent, { base64: true });
 
       let coverPath = '';
       let author = 'Unknown Author';
@@ -127,21 +128,29 @@ const importBooks = async () => {
       console.log("epub unzipped, now extracting files...");
 
       // Extract files
-      for (const [relativePath, zipEntry] of Object.entries(zip.files)) {
+      // for (const [relativePath, zipEntry] of Object.entries(zip.files)) {
+      const promises: any = [];
+      zipData.forEach((relativePath, zipEntry) => {
         if (!zipEntry.dir) {
-          const content = await zipEntry.async('arraybuffer');
-          const filePath = `${bookDir}${relativePath}`;
-          const dirPath = filePath.substring(0, filePath.lastIndexOf('/'));
-          await FileSystem.makeDirectoryAsync(dirPath, { intermediates: true });
-          await FileSystem.writeAsStringAsync(filePath, btoa(String.fromCharCode.apply(null, Array.from(new Uint8Array(content)))), { encoding: FileSystem.EncodingType.Base64 });
+          promises.push(
+            (async () => {
+              const content = await zipEntry.async('arraybuffer');
+              const filePath = `${bookDir}${relativePath}`;
+              const dirPath = filePath.substring(0, filePath.lastIndexOf('/'));
+              await FileSystem.makeDirectoryAsync(dirPath, { intermediates: true });
+              await FileSystem.writeAsStringAsync(filePath, btoa(String.fromCharCode.apply(null, Array.from(new Uint8Array(content)))), { encoding: FileSystem.EncodingType.Base64 });
 
-          if (relativePath.endsWith('.opf')) {
-            opfPath = filePath;
-          }
+              if (relativePath.endsWith('.opf')) {
+                opfPath = filePath;
+              }
+            })()
+          );
         }
-      }
+      });
 
-      console.log(`EPUB extracted to: ${bookDir}`);
+      await Promise.all(promises);
+
+      console.log('EPUB extracted to: ' + bookDir);
 
       console.log("Parsing OPF file...");
 
