@@ -6,12 +6,12 @@ import * as FileSystem from 'expo-file-system';
 import { HTMLContentModel, HTMLElementModel, MixedStyleDeclaration, RenderHTML, HTMLSource, RenderHTMLProps, HTMLSourceInline } from 'react-native-render-html';
 import { DOMParser } from '@xmldom/xmldom';
 import { GestureHandlerRootView } from "react-native-gesture-handler";
-import path from 'path-browserify';
 
 interface Section {
   path: string;
   title: string;
 }
+
 
 const EpubReader = () => {
   const [sections, setSections] = useState<Section[]>([]);
@@ -24,18 +24,50 @@ const EpubReader = () => {
   const [showNavigation, setShowNavigation] = useState(true);
   const fadeAnim = useState(new Animated.Value(1))[0];
 
+  let initialBookProgress = 0;
+
+  const initializeBookProgress = async () => {
+    initialBookProgress = await loadInitialBookProgress();
+  };
+
+  initializeBookProgress();
+
+  async function loadInitialBookProgress() {
+    const booksJsonPath = `${FileSystem.documentDirectory}books.json`;
+    const booksJson = await FileSystem.readAsStringAsync(booksJsonPath);
+    const books = JSON.parse(booksJson);
+
+    for (var i = 0; i < books.length; i++) {
+      if (books[i].location == bookLocation || books[i].title == bookTitle) {
+        console.log('returning initial progress of :', books[i].progress);
+        return books[i].progress;
+      }
+    }
+  };
+
+  let bookProgressToNumber = Number(Array.isArray(initialBookProgress) ? initialBookProgress[0] : bookProgress) || 0;
+  if (bookProgressToNumber < 0) bookProgressToNumber = 0;
+
+  const [bookProgressNumber, setBookProgressNumber] = useState(bookProgressToNumber);
+
+  useEffect(() => {
+    let bookProgressToNumber = Number(Array.isArray(bookProgress) ? bookProgress[0] : bookProgress) || 0;
+    if (bookProgressToNumber < 0) bookProgressToNumber = 0;
+    setBookProgressNumber(bookProgressToNumber);
+  }, [bookProgress]);
+
   const bookLocationString = Array.isArray(bookLocation) ? bookLocation[0] : bookLocation as string;
-  let bookProgressNumber = Number(Array.isArray(bookProgress) ? bookProgress[0] : bookProgress) || 0;
 
   useEffect(() => {
     parseEpub();
   }, []);
 
   useEffect(() => {
-    if (sections.length > 0) {
+    if (sections.length > 0 && bookProgressNumber >= 0) {
+      console.log("loading section from useEffect: ", bookProgressNumber);
       loadSection(bookProgressNumber);
     }
-  }, [sections]);
+  }, [bookProgressNumber, sections]);
 
   const toggleNavigation = useCallback(() => {
     console.log("Toggling navigation...");
@@ -58,10 +90,10 @@ const EpubReader = () => {
   const resolvePath = (basePath: string, relativePath: string) => {
     const baseparts = basePath.split('/').filter(p => p !== '');
     const relparts = relativePath.split('/').filter(p => p !== '');
-  
+
     // Remove the filename from basePath
     baseparts.pop();
-  
+
     for (const part of relparts) {
       if (part === '..') {
         baseparts.pop();
@@ -69,27 +101,38 @@ const EpubReader = () => {
         baseparts.push(part);
       }
     }
-  
+
     return normalizePath('/' + baseparts.join('/'));
   };
 
-  const safeReadFile = async (filePath: string): Promise<string | null> => {
+  const safeReadFile = async (filePath: any) => {
+    console.log(`Attempting to read file: ${filePath}`);
     try {
-      const normalizedPath = normalizePath(filePath);
-      console.log("Attempting to read file:", normalizedPath);
-      const content = await FileSystem.readAsStringAsync(normalizedPath, { encoding: FileSystem.EncodingType.UTF8 });
-      return content;
-    } catch (error) {
-      console.error(`Error reading file ${filePath}:`, error);
-      try {
-        const normalizedPath = normalizePath(filePath);
-        console.log("Attempting to read file with fallback encoding:", normalizedPath);
-        const content = await FileSystem.readAsStringAsync(normalizedPath, { encoding: FileSystem.EncodingType.Base64 });
-        return content;
-      } catch (fallbackError) {
-        console.error(`Error reading file with fallback encoding ${filePath}:`, fallbackError);
+      const fileInfo = await FileSystem.getInfoAsync(filePath);
+      if (!fileInfo.exists) {
+        console.log(`File does not exist: ${filePath}`);
         return null;
       }
+
+      try {
+        const content = await FileSystem.readAsStringAsync(filePath, { encoding: FileSystem.EncodingType.UTF8 });
+        console.log(`File read successfully as UTF-8: ${filePath}`);
+        return content;
+      } catch (utf8Error) {
+        console.log(`Failed to read as UTF-8, trying Base64: ${filePath}`);
+        try {
+          const base64Content = await FileSystem.readAsStringAsync(filePath, { encoding: FileSystem.EncodingType.Base64 });
+          const decodedContent = atob(base64Content);
+          console.log(`File read successfully as Base64: ${filePath}`);
+          return decodedContent;
+        } catch (base64Error) {
+          console.error(`Error reading file ${filePath} in both UTF-8 and Base64:`, base64Error);
+          return null;
+        }
+      }
+    } catch (error) {
+      console.error(`Error reading file ${filePath}:`, error);
+      return null;
     }
   };
 
@@ -117,180 +160,73 @@ const EpubReader = () => {
     try {
       console.log("Parsing EPUB directory:", bookLocationString);
       setIsLoading(true);
-  
-      // Normalize the book location string
-      const normalizedBookLocation = normalizePath(bookLocationString);
-  
-      // Find OPF file
-      let opfPath = '';
-      const possibleOpfLocations = [
-        `${normalizedBookLocation}/content.opf`,
-        `${normalizedBookLocation}/OEBPS/content.opf`,
-        `${normalizedBookLocation}/OPS/content.opf`,
-        `${normalizedBookLocation}/META-INF/container.xml`,
-        `${normalizedBookLocation}/package.opf`,
-        `${normalizedBookLocation}/OEBPS/package.opf`,
-        `${normalizedBookLocation}/OPS/package.opf`,
-      ];
-  
-      for (const possiblePath of possibleOpfLocations) {
-        const fileInfo = await FileSystem.getInfoAsync(possiblePath);
-        if (fileInfo.exists) {
-          if (possiblePath.endsWith('container.xml')) {
-            const containerContent = await safeReadFile(possiblePath);
-            if (containerContent) {
-              const containerDoc = new DOMParser().parseFromString(containerContent, 'text/xml');
-              const rootfiles = containerDoc.getElementsByTagName('rootfile');
-              if (rootfiles.length > 0) {
-                const relativePath = rootfiles[0].getAttribute('full-path');
-                if (relativePath) {
-                  opfPath = resolvePath(possiblePath, relativePath);
-                  break;
-                }
-              }
-            }
-          } else {
-            opfPath = possiblePath;
-            break;
-          }
-        }
-      }
-  
-      // If OPF file still not found, search for it
-      if (!opfPath) {
-        console.warn("OPF file not found in expected locations. Searching for .opf files...");
-        const opfFiles = await findFiles(normalizedBookLocation, '.opf');
-        if (opfFiles.length > 0) {
-          opfPath = opfFiles[0];
-        }
-      }
-  
-      if (!opfPath) {
-        throw new Error("Could not find OPF file in EPUB directory");
-      }
-  
-      console.log("OPF path:", opfPath);
-  
-      // Read and parse OPF file
-      const opfContent = await safeReadFile(opfPath);
-      if (!opfContent) {
-        throw new Error(`Failed to read OPF file at ${opfPath}`);
-      }
-  
-      const opfDoc = new DOMParser().parseFromString(opfContent, 'text/xml');
-      
-      // Parse manifest
-      const manifestItems = Array.from(opfDoc.getElementsByTagName('item'));
-      const itemMap = new Map(
-        manifestItems.map(item => [item.getAttribute('id'), item.getAttribute('href')])
-      );
-  
-      // Parse spine
-      let spineItems = Array.from(opfDoc.getElementsByTagName('itemref'));
 
-      const manifestPaths = new Map(
-        Array.from(manifestItems).map(item => {
-          const id = item.getAttribute('id');
-          const href = item.getAttribute('href');
-          if (!id || !href) {
-            throw new Error(`Invalid manifest item: ${item.outerHTML}`);
-          }
-          const fullPath = resolvePath(opfPath, href);
-          return [id, fullPath];
-        })
-      );
-      
-      // If no spine, try to find a logical reading order
-      if (spineItems.length === 0) {
-        console.warn("No spine found. Attempting to create a logical reading order.");
-        spineItems = manifestItems.filter(item => {
-          const mediaType = item.getAttribute('media-type');
-          return mediaType === 'application/xhtml+xml' || mediaType === 'text/html';
-        });
+      // 1. Search for container.xml
+      const containerPath = await findContainerXml(bookLocationString);
+      if (!containerPath) {
+        throw new Error("container.xml not found");
       }
-  
-      // If still no spine items, use all items from manifest
-      if (spineItems.length === 0) {
-        console.warn("No suitable spine items found. Using all manifest items as fallback.");
-        spineItems = manifestItems;
+
+      // 2. Read container.xml and find OPF file
+      const opfPath = await getOpfPath(containerPath);
+      if (!opfPath) {
+        throw new Error("OPF file not found");
       }
-  
-      // Create sections
-      const newSections: Section[] = [];
-      const processedPaths = new Set<string>(); // To avoid duplicates
-  
-      for (let i = 0; i < spineItems.length; i++) {
-        const item = spineItems[i];
-        const idref = item.getAttribute('idref') || item.getAttribute('id');
-        let href = itemMap.get(idref) || item.getAttribute('href');
-        
-        if (href) {
-          // Resolve the full path
-          const fullPath = resolvePath(opfPath, href);
-          
-          if (!processedPaths.has(fullPath)) {
-            processedPaths.add(fullPath);
-  
-            // Try to find a title for the section
-            let title = `Section ${i + 1}`;
-            const contentDoc = await safeReadFile(fullPath);
-            if (contentDoc) {
-              const contentHtml = new DOMParser().parseFromString(contentDoc, 'text/html');
-              const titleElement = 
-                contentHtml.getElementsByTagName('title')[0] || 
-                contentHtml.getElementsByTagName('h1')[0] ||
-                contentHtml.querySelector('[epub:type="title"]');
-              if (titleElement) {
-                title = titleElement.textContent?.trim() || title;
-              }
-            }
-  
-            newSections.push({
-              path: fullPath,
-              title: title
-            });
-          }
-        }
-      }
-  
-      // If still no sections, try to find any HTML or XHTML files
-      if (newSections.length === 0) {
+
+      // 3 & 4. Extract manifest and spine from OPF
+      const { manifest, spine } = await parseOpf(opfPath);
+
+      // filter the spine array to remove null values
+      const filteredSpine: string[] = spine.filter((item): item is string => item !== null);
+
+      // 5, 6 & 7. Process manifest and spine to create sections
+      const newSections = await createSections(manifest, filteredSpine, opfPath);
+
+      // 8 & 9. Parse NCX or Navigation Document (if available)
+      const refinedSections = await refineWithToc(newSections, manifest, opfPath);
+
+      // 10. Handle nested navigation structures (already done in refineWithToc)
+
+      // 11. Handle media overlays (SMIL files) if necessary
+      // This step would require additional implementation
+
+      // 12. Handle multiple renditions (if present)
+      // This step would require additional implementation
+
+      // 13. Final check to ensure all files are accessible
+      const validSections = await validateSections(refinedSections);
+
+      console.log(`Found ${validSections.length} valid sections`);
+
+      // Last ditch attempt to populate sections if none were found
+      if (validSections.length <= 0) {
+
         console.warn("No sections found. Searching for any HTML or XHTML files.");
-        const htmlFiles = await findFiles(normalizedBookLocation, '.html');
-        const xhtmlFiles = await findFiles(normalizedBookLocation, '.xhtml');
+        const htmlFiles = await findFiles(bookLocationString, '.html');
+        console.log("Number of html files", htmlFiles.length);
+        const xhtmlFiles = await findFiles(bookLocationString, '.xhtml');
+        console.log("Number of xhtml files", xhtmlFiles.length);
         const allHtmlFiles = [...htmlFiles, ...xhtmlFiles].sort();
-  
+        console.log("Number of all html files", allHtmlFiles.length);
+
         for (let i = 0; i < allHtmlFiles.length; i++) {
           const filePath = allHtmlFiles[i];
-          newSections.push({
+          validSections.push({
             path: filePath,
             title: `Section ${i + 1}`
           });
         }
+
       }
-  
-      // If we still have no sections, try to parse any text files
-      if (newSections.length === 0) {
-        console.warn("No HTML sections found. Searching for any text files as a last resort.");
-        const textFiles = await findFiles(normalizedBookLocation, '.txt');
-        for (let i = 0; i < textFiles.length; i++) {
-          const filePath = textFiles[i];
-          newSections.push({
-            path: filePath,
-            title: `Section ${i + 1}`
-          });
-        }
-      }
-  
-      if (newSections.length === 0) {
-        throw new Error("No valid sections found in the EPUB");
-      }
-  
-      console.log(`Found ${newSections.length} sections`);
-      setSections(newSections);
+
+      setSections(validSections);
+
+      const validProgress = Math.min(Math.max(0, bookProgressNumber), validSections.length - 1);
+      setBookProgressNumber(validProgress);
+
       setIsLoading(false);
       setError(null);
-  
+
     } catch (error) {
       console.error('Error parsing EPUB:', error);
       setHtmlSource({ html: `<p>Error parsing EPUB: ${error}</p>` });
@@ -299,21 +235,230 @@ const EpubReader = () => {
     }
   };
 
+  const findContainerXml = async (rootDir: string): Promise<string | null> => {
+    const containerPath = `${rootDir}/META-INF/container.xml`;
+    const fileInfo = await FileSystem.getInfoAsync(containerPath);
+    return fileInfo.exists ? containerPath : null;
+  };
+
+  const getOpfPath = async (containerPath: string): Promise<string | null> => {
+    const containerContent = await safeReadFile(containerPath);
+    if (!containerContent) return null;
+
+    const containerDoc = new DOMParser().parseFromString(containerContent, 'text/xml');
+    const rootfiles = containerDoc.getElementsByTagName('rootfile');
+    if (rootfiles.length > 0) {
+      const relativePath = rootfiles[0].getAttribute('full-path');
+      if (relativePath) {
+        console.log("OPF Relative Path:", relativePath);
+        return findFile(bookLocationString, relativePath);
+      }
+    }
+    return null;
+  };
+
+  const saveProgress = useCallback(async (progress: number) => {
+    console.log("Saving progress of", progress, "for book", bookTitle, "at location", bookLocation);
+    const booksJsonPath = `${FileSystem.documentDirectory}books.json`;
+    const booksJson = await FileSystem.readAsStringAsync(booksJsonPath);
+    const books = JSON.parse(booksJson);
+
+    for (var i = 0; i < books.length; i++) {
+      if (books[i].location == bookLocation || books[i].title == bookTitle) {
+        console.log('Found book to update:', books[i]);
+        books[i].progress = progress;
+        console.log('Updated book:', books[i]);
+        break;
+      }
+    }
+
+    console.log('Writing updated books to file...');
+    await FileSystem.writeAsStringAsync(booksJsonPath, JSON.stringify(books));
+    console.log('Books updated and saved to file');
+
+  }, [bookTitle, bookLocation]);
+
+  const findFile = async (dir: string, relativePath: string): Promise<string | null> => {
+    const list = await FileSystem.readDirectoryAsync(dir);
+
+    for (const item of list) {
+      const itemPath = `${dir}/${item}`;
+      const itemInfo = await FileSystem.getInfoAsync(itemPath);
+
+      if (itemInfo.isDirectory) {
+        const result = await findFile(itemPath, relativePath);
+        if (result) return result;
+      } else if (itemPath.includes(relativePath)) {
+        return itemPath;
+      }
+    }
+
+    return null;
+  };
+
+  const parseOpf = async (opfPath: string) => {
+    const opfContent = await safeReadFile(opfPath);
+    if (!opfContent) {
+      throw new Error(`Failed to read OPF file at ${opfPath}`);
+    }
+
+    const opfDoc = new DOMParser().parseFromString(opfContent, 'text/xml');
+
+    const manifest = Array.from(opfDoc.getElementsByTagName('item')).map(item => ({
+      id: item.getAttribute('id'),
+      href: item.getAttribute('href'),
+      mediaType: item.getAttribute('media-type')
+    }));
+
+    const spine = Array.from(opfDoc.getElementsByTagName('itemref')).map(item =>
+      item.getAttribute('idref')
+    );
+
+    return { manifest, spine };
+  };
+
+
+
+  const createSections = async (manifest: any[], spine: string[], opfPath: string) => {
+    const sections: Section[] = [];
+    const supportedTypes = [
+      'application/xhtml+xml',
+      'text/html',
+      'application/xml',
+      'text/xml',
+      'text/x-oeb1-document'
+    ];
+
+    for (const idref of spine) {
+      const item = manifest.find(m => m.id === idref);
+      if (item && supportedTypes.includes(item.mediaType)) {
+        const fullPath = resolvePath(opfPath, item.href);
+        const title = await extractTitle(fullPath);
+        sections.push({ path: fullPath, title: title || `Untitled Section` });
+      }
+    }
+
+    if (bookProgressNumber >= sections.length) {
+      setBookProgressNumber(sections.length - 1);
+    }
+
+    return sections;
+  };
+
+  const extractTitle = async (filePath: string) => {
+    const content = await safeReadFile(filePath);
+    if (!content) return `Untitled Section`;
+
+    const doc = new DOMParser().parseFromString(content, 'text/html');
+    const titleElement =
+      doc.getElementsByTagName('title')[0] ||
+      doc.getElementsByTagName('h1')[0] ||
+      doc.querySelector('[epub:type="title"]');
+
+    return titleElement ? titleElement.textContent?.trim() : `Untitled Section`;
+  };
+
+  const validateSections = async (sections: Section[]) => {
+    const validSections: Section[] = [];
+
+    for (const section of sections) {
+      const fileInfo = await FileSystem.getInfoAsync(section.path);
+      if (fileInfo.exists) {
+        validSections.push(section);
+      } else {
+        console.warn(`File not found: ${section.path}`);
+      }
+    }
+
+    return validSections;
+  };
+
+  const refineWithToc = async (sections: Section[], manifest: any[], opfPath: string) => {
+    const ncxItem = manifest.find(item => item.mediaType === 'application/x-dtbncx+xml');
+    const navItem = manifest.find(item => item.properties?.includes('nav'));
+
+    if (navItem) {
+      // EPUB3 Navigation Document
+      const navPath = resolvePath(opfPath, navItem.href);
+      const navContent = await safeReadFile(navPath);
+      if (navContent) {
+        const navDoc = new DOMParser().parseFromString(navContent, 'text/html');
+        const navPoints = navDoc.getElementsByTagName('li');
+        return refineWithNavPoints(sections, Array.from(navPoints), opfPath);
+      }
+    } else if (ncxItem) {
+      // EPUB2 NCX
+      const ncxPath = resolvePath(opfPath, ncxItem.href);
+      const ncxContent = await safeReadFile(ncxPath);
+      if (ncxContent) {
+        const ncxDoc = new DOMParser().parseFromString(ncxContent, 'text/xml');
+        const navPoints = ncxDoc.getElementsByTagName('navPoint');
+        return refineWithNavPoints(sections, Array.from(navPoints), opfPath);
+      }
+    }
+
+    return sections;
+  };
+
+  const refineWithNavPoints = (sections: Section[], navPoints: Element[], basePath: string) => {
+    const refinedSections: Section[] = [];
+
+    const processNavPoint = (navPoint: Element, level: number = 0) => {
+      const labelElement = navPoint.getElementsByTagName('navLabel')[0] || navPoint.getElementsByTagName('span')[0];
+      const contentElement = navPoint.getElementsByTagName('content')[0] || navPoint.getElementsByTagName('a')[0];
+
+      if (labelElement && contentElement) {
+        const title = labelElement.textContent?.trim() || 'Untitled';
+        const src = contentElement.getAttribute('src');
+
+        if (src) {
+          const fullPath = resolvePath(basePath, src.split('#')[0]);
+          const existingSection = sections.find(s => s.path === fullPath);
+
+          if (existingSection) {
+            refinedSections.push({ ...existingSection, title: title });
+          } else {
+            refinedSections.push({ path: fullPath, title: title });
+          }
+        }
+      }
+
+      // Process child nav points (for nested structures)
+      const childNavPoints = navPoint.getElementsByTagName('navPoint');
+      for (let i = 0; i < childNavPoints.length; i++) {
+        processNavPoint(childNavPoints[i], level + 1);
+      }
+    };
+
+    for (const navPoint of navPoints) {
+      processNavPoint(navPoint);
+    }
+
+    // Add any sections that weren't in the TOC but were in the spine
+    for (const section of sections) {
+      if (!refinedSections.some(s => s.path === section.path)) {
+        refinedSections.push(section);
+      }
+    }
+
+    return refinedSections;
+  };
+
   const loadSection = async (index: number) => {
     console.log("Loading section:", index);
-  
+
     if (index < 0 || index >= sections.length) return;
-  
+
     try {
       setIsLoading(true);
       console.log("Reading section content...");
-      
+
       // Check if the file exists before trying to read it
       const fileInfo = await FileSystem.getInfoAsync(sections[index].path);
       if (!fileInfo.exists) {
         throw new Error(`File does not exist: ${sections[index].path}`);
       }
-  
+
       // Try to read the file content
       let sectionContent;
       try {
@@ -324,28 +469,30 @@ const EpubReader = () => {
         const base64Content = await FileSystem.readAsStringAsync(sections[index].path, { encoding: FileSystem.EncodingType.Base64 });
         sectionContent = atob(base64Content);
       }
-  
+
       console.log("Read section content, now creating DOM Parser");
       const parser = new DOMParser();
       console.log("Created DOM Parser, now parsing section content");
       const doc = parser.parseFromString(sectionContent, 'text/html');
       console.log("Parsed section content, now getting body element");
       const body = doc.getElementsByTagName('body')[0];
-  
+
       console.log("Got body element, setting HTML source...");
       if (body && body.innerHTML) {
         console.log("Setting HTML source from body inner HTML");
-        console.log("Body inner HTML: ", body.innerHTML);
+        //console.log("Body inner HTML: ", body.innerHTML);
         setHtmlSource({ html: body.innerHTML });
       } else {
         console.log("Setting HTML source from section content");
-        console.log("Section content: ", sectionContent);
+        //console.log("Section content: ", sectionContent);
         setHtmlSource({ html: sectionContent });
       }
-  
+
       setCurrentSectionIndex(index);
+      setBookProgressNumber(index);
       setIsLoading(false);
       setError(null);
+      await saveProgress(index);
     } catch (error) {
       console.error('Error loading section:', error);
       setHtmlSource({ html: `<p>Error loading section: ${error}</p>` });
@@ -356,17 +503,19 @@ const EpubReader = () => {
 
   const goToNextSection = useCallback(() => {
     if (currentSectionIndex < sections.length - 1) {
-      bookProgressNumber++;
-      loadSection(currentSectionIndex + 1);
+      const nextProgress = bookProgressNumber + 1;
+      setBookProgressNumber(nextProgress);
+      loadSection(nextProgress);
     }
-  }, [currentSectionIndex, sections.length, loadSection]);
+  }, [currentSectionIndex, sections.length, loadSection, bookProgressNumber]);
 
   const goToPreviousSection = useCallback(() => {
     if (currentSectionIndex > 0) {
-      loadSection(currentSectionIndex - 1);
-      bookProgressNumber--;
+      const prevProgress = bookProgressNumber - 1;
+      setBookProgressNumber(prevProgress);
+      loadSection(prevProgress);
     }
-  }, [currentSectionIndex, loadSection]);
+  }, [currentSectionIndex, loadSection, bookProgressNumber]);
 
   const renderersProps = useMemo<RenderHTMLProps['renderersProps']>(() => ({
     img: {
