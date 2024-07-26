@@ -1,16 +1,20 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, Animated, TouchableWithoutFeedback } from 'react-native';
-import { useWindowDimensions } from 'react-native';
+import { useWindowDimensions, Modal } from 'react-native';
 import { useLocalSearchParams } from 'expo-router';
 import * as FileSystem from 'expo-file-system';
 import { HTMLContentModel, HTMLElementModel, MixedStyleDeclaration, RenderHTML, HTMLSource, RenderHTMLProps, HTMLSourceInline } from 'react-native-render-html';
 import { DOMParser } from '@xmldom/xmldom';
 import { GestureHandlerRootView } from "react-native-gesture-handler";
+import * as SQLite from 'expo-sqlite';
+import { SelectableText } from "@alentoma/react-native-selectable-text";
 
 interface Section {
   path: string;
   title: string;
 }
+
+const db = SQLite.openDatabaseSync('japanese_english_dictionary.db');
 
 
 const EpubReader = () => {
@@ -23,6 +27,13 @@ const EpubReader = () => {
   const { width } = useWindowDimensions();
   const [showNavigation, setShowNavigation] = useState(true);
   const fadeAnim = useState(new Animated.Value(1))[0];
+
+  const [selectedWord, setSelectedWord] = useState<string>('');
+  const contentRef = useRef<any>(null);
+
+  const [selectedText, setSelectedText] = useState<string>('');
+  const [definition, setDefinition] = useState<string>('');
+  const [modalVisible, setModalVisible] = useState<boolean>(false);
 
   let initialBookProgress = 0;
 
@@ -42,6 +53,67 @@ const EpubReader = () => {
         console.log('returning initial progress of :', books[i].progress);
         return books[i].progress;
       }
+    }
+  };
+
+  const handleTextSelection = useCallback(async (event: any) => {
+    const selectedText = event.nativeEvent.selectedText;
+    if (selectedText) {
+      setSelectedText(selectedText);
+      const def = await queryDictionary(selectedText);
+      setDefinition(def);
+      setModalVisible(true);
+    }
+  }, []);
+
+  const handleTextPress = useCallback(
+    async (event: any) => {
+      const { pageX, pageY } = event.nativeEvent;
+      const word = await findWordAtPosition(pageX, pageY);
+      if (word) {
+        setSelectedWord(word);
+        const def = await queryDictionary(word);
+        setDefinition(def);
+        setModalVisible(true);
+      }
+    },
+    []
+  );
+
+  const findWordAtPosition = async (x: number, y: number): Promise<string | null> => {
+    return new Promise((resolve) => {
+      if (contentRef.current) {
+        contentRef.current.measureInWindow((fx: number, fy: number, width: number, height: number) => {
+          const relativeX = x - fx;
+          const relativeY = y - fy;
+          // This is a simplified word boundary detection.
+          // You may need to implement a more sophisticated algorithm based on your needs.
+          const text = contentRef.current.textContent;
+          const words = text.split(/\s+/);
+          const index = Math.floor((relativeX / width) * words.length);
+          resolve(words[index] || null);
+        });
+      } else {
+        resolve(null);
+      }
+    });
+  };
+
+  const queryDictionary = async (word: string): Promise<string> => {
+    try {
+      const result = await db.getFirstAsync<{ definition: string }>(
+        'SELECT definition FROM definitions WHERE entry_id IN (SELECT id FROM entries WHERE word = ? OR reading = ?) LIMIT 1',
+        [word, word]
+      );
+      
+      if (result) {
+        return result.definition;
+      } else {
+        return 'Definition not found';
+      }
+    } catch (error) {
+      console.error('Error querying dictionary:', error);
+      throw error;
     }
   };
 
@@ -576,7 +648,7 @@ const EpubReader = () => {
             renderersProps={renderersProps}
             ignoredDomTags={['svg']}
             baseStyle={{ color: '#FFFFFF', backgroundColor: '#000000' }}
-            defaultTextProps={{ selectable: true }}
+            defaultTextProps={{ selectable: true, selectionColor: 'rgba(0, 0, 0, 0.3)' }}
             GenericPressable={TouchableOpacity}
           />
         ) : (
@@ -603,11 +675,27 @@ const EpubReader = () => {
   );
 };
 
+document.addEventListener('selectionchange', () => {
+  console.log('Selection changed:', window.getSelection());
+  const selection = window.getSelection();
+  if (selection && selection.toString().length > 0) {
+    const selectionRect = selection.getRangeAt(0).getBoundingClientRect();
+    const event = new CustomEvent('selectionchange', {
+      detail: {
+        selectedText: selection.toString(),
+        x: selectionRect.left,
+        y: selectionRect.top,
+      },
+    });
+    document.dispatchEvent(event);
+  }
+});
+
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    padding: 10,
+    padding: 0,
     justifyContent: 'center',
     alignItems: 'center',
     backgroundColor: '#000000',
@@ -639,6 +727,33 @@ const styles = StyleSheet.create({
   errorText: {
     color: 'red',
     fontSize: 16,
+    textAlign: 'center',
+  },
+  modalContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+  },
+  modalContent: {
+    backgroundColor: 'white',
+    padding: 20,
+    borderRadius: 10,
+    width: '80%',
+  },
+  word: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 10,
+    color: '#000000',
+  },
+  definition: {
+    fontSize: 16,
+    color: '#000000',
+  },
+  closeButton: {
+    marginTop: 20,
+    color: 'blue',
     textAlign: 'center',
   },
 });

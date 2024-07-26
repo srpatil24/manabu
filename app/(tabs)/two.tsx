@@ -1,3 +1,4 @@
+import React, { useState } from 'react';
 import { StyleSheet, Pressable } from 'react-native';
 import { Text, View } from '@/components/Themed';
 import * as FileSystem from 'expo-file-system';
@@ -7,25 +8,30 @@ import JSZip from 'jszip';
 
 let db: SQLite.SQLiteDatabase;
 
-//SQLite.openDatabaseAsync('dictionary.db').then(database => db = database);
-
 export default function TabTwoScreen() {
+  const [importStatus, setImportStatus] = useState<string>('');
+
+  const importDictionaryFile = async () => {
+    try {
+      const response = await DocumentPicker.getDocumentAsync({ type: 'application/zip' });
+      if (!response.canceled) {
+        await importDictionary(response.assets[0].uri);
+        setImportStatus('Dictionary imported successfully!');
+      }
+    } catch (error) {
+      console.error('Error importing dictionary:', error);
+      setImportStatus('Error importing dictionary.');
+    }
+  };
+
   return (
     <View style={styles.container}>
       <Pressable style={styles.button} onPress={importDictionaryFile}>
         <Text style={styles.text}>Import Dictionary</Text>
       </Pressable>
+      <Text>{importStatus}</Text>
     </View>
   );
-}
-
-function importDictionaryFile(){
-  DocumentPicker.getDocumentAsync({type: 'application/zip'}).then((response) => {
-    if (!response.canceled) {
-      importDictionary(response.assets[0].uri);
-    }
-  });
-
 }
 
 const setupDatabase = async () => {
@@ -36,6 +42,7 @@ const setupDatabase = async () => {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       word TEXT NOT NULL,
       reading TEXT,
+      language TEXT,
       UNIQUE(word, reading)
     );`,
     `CREATE TABLE IF NOT EXISTS definitions (
@@ -67,11 +74,12 @@ const processDictionaryData = async (data: any[]) => {
     await db.withExclusiveTransactionAsync(async (tx) => {
       for (const entry of data) {
         const [word, reading, , , , content] = entry;
+        const language = 'ja'; // Assume Japanese for this example
 
         // Insert entry
         const entryResult = await tx.runAsync(
-          'INSERT OR IGNORE INTO entries (word, reading) VALUES (?, ?)',
-          [word, reading]
+          'INSERT OR IGNORE INTO entries (word, reading, language) VALUES (?, ?, ?)',
+          [word, reading, language]
         );
         const entryId = entryResult.lastInsertRowId;
 
@@ -126,22 +134,6 @@ const parseStructuredContent = (content: any): { partOfSpeech: string, definitio
   };
 };
 
-const lookupWord = async (query: string): Promise<any[]> => {
-  try {
-    const result = await db.getAllAsync(
-      `SELECT e.word, e.reading, d.part_of_speech, d.definition
-       FROM entries e
-       JOIN definitions d ON e.id = d.entry_id
-       WHERE e.word = ? OR e.reading = ?`,
-      [query, query]
-    );
-    return result;
-  } catch (error) {
-    console.error('Error looking up word:', error);
-    throw error;
-  }
-};
-
 const importDictionary = async (uri: string) => {
   try {
     await setupDatabase();
@@ -172,10 +164,9 @@ const importDictionary = async (uri: string) => {
     console.log('Dictionary import completed successfully.');
   } catch (error) {
     console.error('Error importing dictionary:', error);
+    throw error;
   }
 };
-
-export { setupDatabase, importDictionary, lookupWord };
 
 const styles = StyleSheet.create({
   container: {
@@ -193,4 +184,3 @@ const styles = StyleSheet.create({
     borderRadius: 5,
   }
 });
-
